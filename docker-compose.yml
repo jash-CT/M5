@@ -1,0 +1,124 @@
+# IoT & Industrial Control Stack - Production Compose
+version: "3.9"
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-iot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-iot_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-iot_platform}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./scripts/schema.sql:/docker-entrypoint-initdb.d/02-schema.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iot} -d ${POSTGRES_DB:-iot_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$SYS/broker/version", "-C", "1", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-iot}:${POSTGRES_PASSWORD:-iot_secret}@postgres:5432/${POSTGRES_DB:-iot_platform}
+      REDIS_URL: redis://redis:6379/0
+      MQTT_BROKER: mqtt
+      MQTT_PORT: 1883
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  ingest:
+    build:
+      context: .
+      dockerfile: services/ingest/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-iot}:${POSTGRES_PASSWORD:-iot_secret}@postgres:5432/${POSTGRES_DB:-iot_platform}
+      REDIS_URL: redis://redis:6379/0
+      MQTT_BROKER: mqtt
+      MQTT_PORT: 1883
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+
+  rules-engine:
+    build:
+      context: .
+      dockerfile: services/rules-engine/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-iot}:${POSTGRES_PASSWORD:-iot_secret}@postgres:5432/${POSTGRES_DB:-iot_platform}
+      REDIS_URL: redis://redis:6379/0
+      MQTT_BROKER: mqtt
+      MQTT_PORT: 1883
+      API_BASE_URL: http://api:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+      api:
+        condition: service_healthy
+
+  scada-gateway:
+    build:
+      context: .
+      dockerfile: services/scada-gateway/Dockerfile
+    environment:
+      MQTT_BROKER: mqtt
+      MQTT_PORT: 1883
+      OPCUA_ENDPOINT: ${OPCUA_ENDPOINT:-}
+      MODBUS_HOST: ${MODBUS_HOST:-}
+      MODBUS_PORT: ${MODBUS_PORT:-502}
+    depends_on:
+      mqtt:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
