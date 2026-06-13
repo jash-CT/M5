@@ -92,7 +92,21 @@ def flush_batch(force: bool = False):
         logger.debug("Flushed %d telemetry rows", len(rows))
     except Exception as e:
         logger.exception("Failed to flush telemetry: %s", e)
-        _batch = rows + _batch  # re-queue
+        # Add retry tracking to prevent infinite loops
+        for row in rows:
+            if isinstance(row, tuple) and len(row) >= 8:
+                # Convert tuple to list with retry count if not already tracked
+                if len(row) == 8:
+                    row_with_retry = list(row) + [1]  # Add retry count = 1
+                else:
+                    row_with_retry = list(row)
+                    row_with_retry[-1] = min(row_with_retry[-1] + 1, 5)  # Increment retry count, max 5
+                
+                # Only re-queue if retry count is less than 5
+                if row_with_retry[-1] < 5:
+                    _batch.append(tuple(row_with_retry))
+                else:
+                    logger.warning("Discarding telemetry row after 5 failed attempts: %s", row[:3])  # Log first 3 fields for identification
 
 
 def try_device_id(s: str) -> UUID | None:
